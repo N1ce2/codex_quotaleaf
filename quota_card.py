@@ -16,7 +16,7 @@ from reset_cards import reset_inventory, reset_usable, ResetCardsDialog
 
 from PyQt5.QtCore import (Qt, QProcess, QProcessEnvironment, QTimer, QRectF,
                           QPoint, QPointF, QSize, QStandardPaths, QLockFile)
-from PyQt5.QtGui import (QColor, QFont, QIcon, QPainter, QPainterPath, QPen,
+from PyQt5.QtGui import (QColor, QFont, QFontMetricsF, QIcon, QPainter, QPainterPath, QPen,
                          QPixmap, QLinearGradient)
 from PyQt5.QtWidgets import (QApplication, QWidget, QDialog, QVBoxLayout,
     QHBoxLayout, QLabel, QPushButton, QCheckBox, QComboBox, QSlider,
@@ -607,7 +607,10 @@ class QuotaCard(QWidget):
         p.setClipping(False)
         accent=QColor(self.settings['accent']);bucket,_=extract_bucket(self.payload,self.settings['bucket'])
         settings_y=h-35 if self.settings['compact'] else h-43
-        self.controls={'pin':QRectF(w-96,16,24,26),'refresh':QRectF(w-66,16,24,26),'menu':QRectF(w-36,16,24,26),'settings':QRectF(w-42,settings_y,26,27),'reset_cards':QRectF(18,settings_y,210,27)}
+        count,_=reset_inventory(self.payload)
+        label=f'剩余 {count if count is not None else "—"} 张重置卡'
+        label_width=QFontMetricsF(QFont('Microsoft YaHei UI',9)).horizontalAdvance(label)
+        self.controls={'pin':QRectF(w-96,16,24,26),'refresh':QRectF(w-66,16,24,26),'menu':QRectF(w-36,16,24,26),'settings':QRectF(w-42,settings_y,26,27),'reset_cards':QRectF(18,settings_y,label_width+12,27)}
         # Gauge emblem deliberately follows the reference's fine strokes.
         p.setPen(QPen(accent,1.7,Qt.SolidLine,Qt.RoundCap));p.drawArc(QRectF(23,23,17,17),-25*16,230*16)
         p.drawLine(QPoint(31,32),QPoint(38,24));p.drawEllipse(QRectF(29,30,3,3))
@@ -646,9 +649,7 @@ class QuotaCard(QWidget):
             p.setPen(Qt.NoPen);p.setBrush(track);p.drawRoundedRect(QRectF(24,track_y,w-48,3),1.5,1.5)
             if val is not None and val>0:
                 p.setBrush(color);p.drawRoundedRect(QRectF(24,track_y,(w-48)*val/100,3),1.5,1.5)
-        count,_=reset_inventory(self.payload)
-        label=f'剩余 {count if count is not None else "—"} 张重置卡'
-        self.draw_text(p,24,settings_y,195,27,label,9,muted)
+        self.draw_text(p,24,settings_y,label_width+1,27,label,9,muted)
         self.icon(p,'settings',self.controls['settings'],muted)
         p.end()
         if bucket:
