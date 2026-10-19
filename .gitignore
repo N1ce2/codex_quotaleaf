@@ -1,0 +1,25 @@
+# Local settings, positions, cached account usage and logs
+state/
+*.log
+
+# Python / local environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.env.*
+
+# Build output and private local screenshots
+build/
+dist/
+*.spec
+/实时卡片.png
+/外观预览.png
+/设置预览.png
+
+# Local IDE files
+.idea/
+.vscode/
+Thumbs.db
+Desktop.ini
