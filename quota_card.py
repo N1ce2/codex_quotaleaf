@@ -608,8 +608,7 @@ class QuotaCard(QWidget):
 
     def open_menu(self,point):
         menu=RoundedMenu(self)
-        menu.addAction('立即刷新',self.refresh)
-        for text,key in [('锁定位置','locked'),('始终置顶','topmost'),('紧凑模式','compact')]:
+        for text,key in [('锁定位置','locked'),('紧凑模式','compact')]:
             action=menu.addAction(text);action.setCheckable(True);action.setChecked(self.settings[key]);action.toggled.connect(lambda v,k=key:self.set_option(k,v))
         menu.addSeparator();menu.addAction('更换背景图片…',self.choose_background);menu.addAction('外观与个性化…',self.open_settings)
         menu.addAction('隐藏到托盘',self.hide)
