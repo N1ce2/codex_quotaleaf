@@ -10,6 +10,9 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
+
+from reset_cards import reset_inventory, reset_usable, ResetCardsDialog
 
 from PyQt5.QtCore import (Qt, QProcess, QProcessEnvironment, QTimer, QRectF,
                           QPoint, QPointF, QSize, QStandardPaths, QLockFile)
@@ -130,6 +133,16 @@ class UsageClient(QWidget):
         self.pending = None
         self.seq = 10
         self.stopping = False
+        self.reset_request = None
+        self.refresh_after_reset = False
+        self.reset_keys = {}
+        try:
+            keys=json.loads((STATE/'reset-attempts.json').read_text('utf-8'))
+            if isinstance(keys,dict):self.reset_keys=keys
+        except (OSError,ValueError):pass
+        self.reset_deadline=QTimer(self)
+        self.reset_deadline.setSingleShot(True)
+        self.reset_deadline.timeout.connect(self.reset_timeout)
         self.deadline = QTimer(self)
         self.deadline.setSingleShot(True)
         self.deadline.timeout.connect(self.timeout)
@@ -187,9 +200,15 @@ class UsageClient(QWidget):
                 self.deadline.stop()
                 self.send({'method':'initialized','params':{}})
                 self.refresh()
+            elif self.reset_request and message.get('id')==self.reset_request['rpc_id']:
+                self.finish_reset(message)
             elif message.get('id') == self.pending and self.pending is not None:
                 self.pending = None
                 self.deadline.stop()
+                if self.refresh_after_reset:
+                    self.refresh_after_reset=False
+                    self.refresh()
+                    continue
                 if 'result' in message:
                     self.owner.accept_usage(message['result'])
                 else:
@@ -204,12 +223,12 @@ class UsageClient(QWidget):
                         text = '暂时无法查询额度，请稍后刷新。'
                     self.owner.connection_error(text)
             elif message.get('method') == 'account/rateLimits/updated':
-                self.owner.accept_usage(message.get('params', {}))
+                self.owner.accept_usage(message.get('params', {}),partial=True)
             elif 'id' in message and 'method' in message:
                 self.send({'id':message['id'],'error':{'code':-32601,'message':'Read-only quota client'}})
 
     def refresh(self):
-        if self.pending is not None:
+        if self.pending is not None or self.reset_request is not None:
             return
         if not self.ready:
             self.start()
@@ -220,6 +239,48 @@ class UsageClient(QWidget):
         self.send({'id':self.pending,'method':'account/rateLimits/read'})
         self.deadline.start(30000)
 
+    def consume_reset(self,credit):
+        count,cards=reset_inventory(self.owner.payload)
+        current=next((c for c in cards or [] if c.get('id')==credit.get('id')),None)
+        if (not self.ready or self.reset_request is not None or not self.owner.reset_data_fresh()
+                or not count or not current or not reset_usable(current)):
+            return False
+        credit_id=current['id']
+        key=self.reset_keys.get(credit_id) or str(uuid.uuid4())
+        self.reset_keys[credit_id]=key
+        # Save before sending, so an uncertain retry after restart reuses the same key.
+        if not self.owner.preview:atomic_json(STATE/'reset-attempts.json',self.reset_keys)
+        self.seq+=1
+        self.reset_request={'rpc_id':self.seq,'credit_id':credit_id,'key':key}
+        self.send({'id':self.seq,'method':'account/rateLimitResetCredit/consume',
+                   'params':{'idempotencyKey':key,'creditId':credit_id}})
+        self.reset_deadline.start(30000)
+        return True
+
+    def finish_reset(self,message):
+        attempt=self.reset_request
+        self.reset_request=None;self.reset_deadline.stop()
+        outcome=(message.get('result') or {}).get('outcome')
+        texts={'reset':'使用成功，正在同步新的额度和卡片数量。',
+               'alreadyRedeemed':'这次请求已处理，正在同步最新数据。',
+               'nothingToReset':'当前没有符合条件的额度可重置，本次未使用重置卡。',
+               'noCredit':'没有可用的重置卡，正在刷新卡片信息。'}
+        if outcome in ('nothingToReset','noCredit'):
+            self.reset_keys.pop(attempt['credit_id'],None)
+            if not self.owner.preview:atomic_json(STATE/'reset-attempts.json',self.reset_keys)
+        self.owner.reset_refresh_pending=True
+        self.owner.reset_result(texts.get(outcome,'使用结果未确认，请先刷新确认；重试同一张卡会复用原请求，避免重复使用。'))
+        if self.pending is not None:self.refresh_after_reset=True
+        else:self.refresh()
+
+    def reset_timeout(self):
+        if not self.reset_request:return
+        self.reset_request=None
+        self.owner.reset_refresh_pending=True
+        self.owner.reset_result('请求超时，结果未确认。请先刷新；重试同一张卡会复用原请求。')
+        if self.pending is not None:self.refresh_after_reset=True
+        else:self.refresh()
+
     def timeout(self):
         self.pending = None
         self.owner.connection_error('连接超时，将自动重试。')
@@ -227,6 +288,10 @@ class UsageClient(QWidget):
             self.proc.kill()
 
     def exited(self, *args):
+        if self.reset_request:
+            self.reset_request=None;self.reset_deadline.stop()
+            self.owner.reset_refresh_pending=True
+            self.owner.reset_result('连接中断，重置结果未确认；重新连接后请核对卡片数量。')
         self.ready = False
         self.pending = None
         if not self.stopping:
@@ -237,6 +302,7 @@ class UsageClient(QWidget):
         self.stopping = True
         self.retry.stop()
         self.deadline.stop()
+        self.reset_deadline.stop()
         if self.proc and self.proc.state() != QProcess.NotRunning:
             self.proc.closeWriteChannel()
             if not self.proc.waitForFinished(1200):
@@ -375,6 +441,9 @@ class QuotaCard(QWidget):
         self.available_buckets=[]
         self.bg_image=QPixmap(self.settings['image']) if self.settings['image'] else QPixmap()
         self.dialog=None
+        self.reset_dialog=None
+        self.cards_synced_at=None
+        self.reset_refresh_pending=False
         self.setWindowTitle('GPT 额度卡片')
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setMouseTracking(True)
@@ -452,7 +521,12 @@ class QuotaCard(QWidget):
         self.refreshing=False;self.error=True;self.status=text
         self.setToolTip(text);self.update()
 
-    def accept_usage(self,payload):
+    def accept_usage(self,payload,partial=False):
+        if partial:
+            payload={**self.payload,**payload}
+        else:
+            self.cards_synced_at=time.time()
+            self.reset_refresh_pending=False
         bucket,self.available_buckets=extract_bucket(payload,self.settings['bucket'])
         if not bucket:
             self.connection_error('当前账号未返回额度数据。请确认使用 ChatGPT 登录。');return
@@ -460,6 +534,27 @@ class QuotaCard(QWidget):
         self.status='已连接 · 自动刷新';self.setToolTip('拖动移动 · 双击打开设置 · 右键查看更多操作')
         if not self.preview:atomic_json(STATE/'usage-cache.json',dict(payload=payload,timestamp=self.last_success))
         self.update()
+        if self.reset_dialog:self.reset_dialog.sync()
+
+    def reset_data_fresh(self):
+        return (self.has_live_data and not self.error and self.client.ready
+                and not self.reset_refresh_pending and self.cards_synced_at is not None
+                and time.time()-self.cards_synced_at<max(60,self.settings['interval']*2))
+
+    def open_reset_cards(self):
+        if self.reset_dialog:
+            self.reset_dialog.show();self.reset_dialog.raise_();return
+        self.reset_dialog=ResetCardsDialog(self)
+        self.reset_dialog.finished.connect(self.reset_dialog_closed)
+        self.reset_dialog.show()
+        self.refresh()
+
+    def reset_dialog_closed(self):
+        self.reset_dialog.deleteLater();self.reset_dialog=None
+
+    def reset_result(self,text):
+        if self.reset_dialog:self.reset_dialog.show_result(text)
+        else:self.tray.showMessage('额度重置卡',text,QSystemTrayIcon.Information,7000)
 
     def refresh(self):
         if not self.preview:self.client.refresh()
@@ -512,7 +607,7 @@ class QuotaCard(QWidget):
         p.setClipping(False)
         accent=QColor(self.settings['accent']);bucket,_=extract_bucket(self.payload,self.settings['bucket'])
         settings_y=h-35 if self.settings['compact'] else h-43
-        self.controls={'pin':QRectF(w-96,16,24,26),'refresh':QRectF(w-66,16,24,26),'menu':QRectF(w-36,16,24,26),'settings':QRectF(w-42,settings_y,26,27)}
+        self.controls={'pin':QRectF(w-96,16,24,26),'refresh':QRectF(w-66,16,24,26),'menu':QRectF(w-36,16,24,26),'settings':QRectF(w-42,settings_y,26,27),'reset_cards':QRectF(18,settings_y,210,27)}
         # Gauge emblem deliberately follows the reference's fine strokes.
         p.setPen(QPen(accent,1.7,Qt.SolidLine,Qt.RoundCap));p.drawArc(QRectF(23,23,17,17),-25*16,230*16)
         p.drawLine(QPoint(31,32),QPoint(38,24));p.drawEllipse(QRectF(29,30,3,3))
@@ -523,7 +618,7 @@ class QuotaCard(QWidget):
                 p.setPen(Qt.NoPen);p.setBrush(hover)
                 button_radius=min(radius,area.width()/2,area.height()/2)
                 p.drawRoundedRect(area,button_radius,button_radius)
-            if name=='settings':continue
+            if name in ('settings','reset_cards'):continue
             col=accent if name=='pin' and self.settings['topmost'] else muted
             self.icon(p,name,area,col)
         compact=self.settings['compact']
@@ -551,14 +646,9 @@ class QuotaCard(QWidget):
             p.setPen(Qt.NoPen);p.setBrush(track);p.drawRoundedRect(QRectF(24,track_y,w-48,3),1.5,1.5)
             if val is not None and val>0:
                 p.setBrush(color);p.drawRoundedRect(QRectF(24,track_y,(w-48)*val/100,3),1.5,1.5)
-        footer_y=h-32
-        stale=self.last_success and time.time()-self.last_success>max(180,self.settings['interval']*3)
-        if self.error:status='连接待恢复 · 上次数据' if self.last_success else '未连接 · 点击刷新'
-        elif stale:status='数据较旧 · 点击刷新'
-        elif self.last_success:status=''
-        elif self.refreshing:status='正在连接…'
-        else:status='等待额度数据'
-        self.draw_text(p,24,footer_y-2,w-74,20,status,8,muted)
+        count,_=reset_inventory(self.payload)
+        label=f'剩余 {count if count is not None else "—"} 张重置卡'
+        self.draw_text(p,24,settings_y,195,27,label,9,muted)
         self.icon(p,'settings',self.controls['settings'],muted)
         p.end()
         if bucket:
@@ -576,6 +666,7 @@ class QuotaCard(QWidget):
         if control=='pin':self.set_option('topmost',not self.settings['topmost'])
         elif control=='refresh':self.refresh()
         elif control=='settings':self.open_settings()
+        elif control=='reset_cards':self.open_reset_cards()
         elif control=='menu':self.open_menu(event.globalPos())
         elif not self.settings['locked']:self.drag_start=event.globalPos()-self.frameGeometry().topLeft()
 
@@ -692,7 +783,8 @@ def main():
         def result_exit():
             if card.has_live_data:
                 data,_=extract_bucket(card.payload)
-                print(json.dumps({'connected':True,'primaryRemaining':remaining(data.get('primary')),'secondaryRemaining':remaining(data.get('secondary'))}))
+                count,_=reset_inventory(card.payload)
+                print(json.dumps({'connected':True,'primaryRemaining':remaining(data.get('primary')),'secondaryRemaining':remaining(data.get('secondary')),'resetCardsAvailable':count}))
                 if args.snapshot:card.grab().save(args.snapshot)
                 card.close()
         card.timer.timeout.connect(result_exit)
