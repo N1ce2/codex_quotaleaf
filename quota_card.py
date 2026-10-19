@@ -12,7 +12,7 @@ import sys
 import time
 import uuid
 
-from reset_cards import reset_inventory, reset_usable, ResetCardsDialog
+from reset_cards import reset_inventory, reset_usable, populate_reset_menu, sync_reset_menu
 
 from PyQt5.QtCore import (Qt, QProcess, QProcessEnvironment, QTimer, QRectF,
                           QPoint, QPointF, QSize, QStandardPaths, QLockFile)
@@ -441,7 +441,8 @@ class QuotaCard(QWidget):
         self.available_buckets=[]
         self.bg_image=QPixmap(self.settings['image']) if self.settings['image'] else QPixmap()
         self.dialog=None
-        self.reset_dialog=None
+        self.reset_menu=None
+        self.reset_message=''
         self.cards_synced_at=None
         self.reset_refresh_pending=False
         self.setWindowTitle('GPT 额度卡片')
@@ -534,7 +535,7 @@ class QuotaCard(QWidget):
         self.status='已连接 · 自动刷新';self.setToolTip('拖动移动 · 双击打开设置 · 右键查看更多操作')
         if not self.preview:atomic_json(STATE/'usage-cache.json',dict(payload=payload,timestamp=self.last_success))
         self.update()
-        if self.reset_dialog:self.reset_dialog.sync()
+        if self.reset_menu:sync_reset_menu(self.reset_menu,self)
 
     def reset_data_fresh(self):
         return (self.has_live_data and not self.error and self.client.ready
@@ -542,18 +543,23 @@ class QuotaCard(QWidget):
                 and time.time()-self.cards_synced_at<max(60,self.settings['interval']*2))
 
     def open_reset_cards(self):
-        if self.reset_dialog:
-            self.reset_dialog.show();self.reset_dialog.raise_();return
-        self.reset_dialog=ResetCardsDialog(self)
-        self.reset_dialog.finished.connect(self.reset_dialog_closed)
-        self.reset_dialog.show()
+        if self.reset_menu:return
+        menu=RoundedMenu(self)
+        self.reset_menu=menu
+        populate_reset_menu(menu,self,RoundedMenu)
+        timer=QTimer(menu);timer.timeout.connect(lambda:sync_reset_menu(menu,self));timer.start(1000)
         self.refresh()
-
-    def reset_dialog_closed(self):
-        self.reset_dialog.deleteLater();self.reset_dialog=None
+        scale=self.settings['scale']/100
+        rect=self.controls.get('reset_cards',QRectF(18,self.height()/scale-35,150,27))
+        anchor=self.mapToGlobal(QPoint(round(rect.left()*scale),round(rect.bottom()*scale)))
+        try:menu.exec_(anchor)
+        finally:
+            timer.stop();self.reset_menu=None;menu.deleteLater()
+            self.hover='';self.update()
 
     def reset_result(self,text):
-        if self.reset_dialog:self.reset_dialog.show_result(text)
+        self.reset_message=text
+        if self.reset_menu:sync_reset_menu(self.reset_menu,self)
         else:self.tray.showMessage('额度重置卡',text,QSystemTrayIcon.Information,7000)
 
     def refresh(self):

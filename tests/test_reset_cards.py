@@ -4,13 +4,12 @@ from pathlib import Path
 import sys
 import time
 import unittest
-from unittest.mock import patch
 
 os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from PyQt5.QtWidgets import QApplication,QMessageBox
-from quota_card import QuotaCard
-from reset_cards import reset_inventory,reset_usable,ResetCardsDialog
+from PyQt5.QtWidgets import QApplication
+from quota_card import QuotaCard,RoundedMenu
+from reset_cards import reset_inventory,reset_usable,populate_reset_menu
 
 
 def fixture():
@@ -34,8 +33,13 @@ class ResetCards(unittest.TestCase):
         self.card.client.send=lambda message:self.sent.append(copy.deepcopy(message))
 
     def tearDown(self):
-        if self.card.reset_dialog:self.card.reset_dialog.close()
+        if hasattr(self,'menu'):self.menu.close()
         self.card.close()
+
+    def make_menu(self):
+        self.menu=RoundedMenu(self.card)
+        populate_reset_menu(self.menu,self.card,RoundedMenu)
+        return self.menu
 
     def test_count_is_authoritative_and_unknown_is_unknown(self):
         count,cards=reset_inventory(fixture())
@@ -57,35 +61,31 @@ class ResetCards(unittest.TestCase):
         self.assertEqual(stamp,self.card.cards_synced_at)
 
     def test_cancel_confirmation_never_sends_redemption(self):
-        dialog=ResetCardsDialog(self.card)
-        credit=fixture()['rateLimitResetCredits']['credits'][0]
-        with patch.object(QMessageBox,'question',return_value=QMessageBox.No):dialog.confirm_use(credit)
-        self.assertEqual(self.sent,[]);dialog.close()
+        menu=self.make_menu()
+        child=menu.credit_actions[0][1].menu()
+        child.actions()[-1].trigger()
+        self.assertEqual(self.sent,[])
 
     def test_state_is_rechecked_after_confirmation(self):
-        dialog=ResetCardsDialog(self.card)
-        credit=fixture()['rateLimitResetCredits']['credits'][0]
-        def changes_while_confirming(*args):
-            self.card.payload['rateLimitResetCredits']['credits']=[]
-            return QMessageBox.Yes
-        with patch.object(QMessageBox,'question',side_effect=changes_while_confirming):dialog.confirm_use(credit)
-        self.assertEqual(self.sent,[]);dialog.close()
+        menu=self.make_menu()
+        self.card.payload['rateLimitResetCredits']['credits']=[]
+        menu.credit_actions[0][2].trigger()
+        self.assertEqual(self.sent,[])
 
     def test_confirmed_selection_sends_only_the_selected_card(self):
-        dialog=ResetCardsDialog(self.card)
+        menu=self.make_menu()
         credit=fixture()['rateLimitResetCredits']['credits'][0]
-        with patch.object(QMessageBox,'question',return_value=QMessageBox.Yes):dialog.confirm_use(credit)
+        menu.credit_actions[0][2].trigger()
         self.assertEqual(len(self.sent),1)
         self.assertEqual(self.sent[0]['params']['creditId'],credit['id'])
         self.assertEqual(self.sent[0]['method'],'account/rateLimitResetCredit/consume')
-        dialog.close()
 
     def test_count_without_details_does_not_auto_select_a_card(self):
         payload=fixture();payload['rateLimitResetCredits']['credits']=None
         self.card.accept_usage(payload)
-        dialog=ResetCardsDialog(self.card)
-        self.assertEqual(len(dialog.buttons),0)
-        self.assertEqual(self.sent,[]);dialog.close()
+        menu=self.make_menu()
+        self.assertEqual(len(menu.credit_actions),0)
+        self.assertEqual(self.sent,[])
 
     def test_offline_cannot_redeem(self):
         self.card.error=True
