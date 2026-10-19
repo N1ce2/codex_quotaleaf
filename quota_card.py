@@ -575,6 +575,21 @@ class QuotaCard(QWidget):
     def draw_text(self,p,x,y,w,h,text,size=10,color='#fff',bold=False,align=Qt.AlignLeft|Qt.AlignVCenter):
         font=QFont('Microsoft YaHei UI',size);font.setWeight(QFont.DemiBold if bold else QFont.Normal)
         p.setFont(font);p.setPen(QColor(color))
+        if size>=18:
+            # Render large percentages as complete vector outlines. Unlike
+            # rectangle-based drawText, no glyph raster or row clip can cut
+            # off the bottom of rounded digits at fractional display scales.
+            outline=QPainterPath()
+            outline.addText(QPointF(0,0),font,str(text))
+            ink=outline.boundingRect()
+            left=x+w-ink.width() if align&Qt.AlignRight else x
+            if align&Qt.AlignHCenter:left=x+(w-ink.width())/2
+            top=y+(h-ink.height())/2 if align&Qt.AlignVCenter else y
+            p.save()
+            p.translate(left-ink.left(),top-ink.top())
+            p.fillPath(outline,QColor(color))
+            p.restore()
+            return
         # Point-sized fonts can be taller than the nominal row at Windows DPI.
         # Expand around the existing centre so descenders aren't clipped while
         # preserving the layout and the percentage symbol's alignment.
