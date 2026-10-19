@@ -510,9 +510,9 @@ class QuotaCard(QWidget):
             fg,muted,line=QColor('#f6f8f5'),QColor('#c0c9c2'),QColor('#ffffff')
             line.setAlpha(45)
         p.setClipping(False)
-        border=QColor(line);border.setAlpha(95);p.setPen(QPen(border,1));p.setBrush(Qt.NoBrush);p.drawPath(clip)
         accent=QColor(self.settings['accent']);bucket,_=extract_bucket(self.payload,self.settings['bucket'])
-        self.controls={'pin':QRectF(w-96,16,24,26),'refresh':QRectF(w-66,16,24,26),'menu':QRectF(w-36,16,24,26),'settings':QRectF(w-42,h-43,26,27)}
+        settings_y=h-35 if self.settings['compact'] else h-43
+        self.controls={'pin':QRectF(w-96,16,24,26),'refresh':QRectF(w-66,16,24,26),'menu':QRectF(w-36,16,24,26),'settings':QRectF(w-42,settings_y,26,27)}
         # Gauge emblem deliberately follows the reference's fine strokes.
         p.setPen(QPen(accent,1.7,Qt.SolidLine,Qt.RoundCap));p.drawArc(QRectF(23,23,17,17),-25*16,230*16)
         p.drawLine(QPoint(31,32),QPoint(38,24));p.drawEllipse(QRectF(29,30,3,3))
