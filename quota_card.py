@@ -575,7 +575,12 @@ class QuotaCard(QWidget):
     def draw_text(self,p,x,y,w,h,text,size=10,color='#fff',bold=False,align=Qt.AlignLeft|Qt.AlignVCenter):
         font=QFont('Microsoft YaHei UI',size);font.setWeight(QFont.DemiBold if bold else QFont.Normal)
         p.setFont(font);p.setPen(QColor(color))
-        p.drawText(QRectF(x,y,w,h),align,str(text))
+        # Point-sized fonts can be taller than the nominal row at Windows DPI.
+        # Expand around the existing centre so descenders aren't clipped while
+        # preserving the layout and the percentage symbol's alignment.
+        extra=max(0,QFontMetricsF(font,p.device()).height()+4-h)
+        text_rect=QRectF(x,y-extra/2,w,h+extra)
+        p.drawText(text_rect,align,str(text))
 
     def icon(self,p,name,rect,color):
         p.save();p.setPen(QPen(color,1.4,Qt.SolidLine,Qt.RoundCap,Qt.RoundJoin));p.setBrush(Qt.NoBrush)
