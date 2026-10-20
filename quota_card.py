@@ -15,11 +15,12 @@ from concurrent.futures import ThreadPoolExecutor
 from task_status import TaskTracker, read_tasks
 from desktop_controls import GlobalShortcut, open_task_thread, open_codex_app
 from app_runtime import runtime_paths, startup_target, VERSION
+from screen_bounds import bounded_position, fitting_scale, screen_index
 
 from reset_cards import reset_inventory, reset_usable, populate_reset_menu, sync_reset_menu
 
 from PyQt5.QtCore import (Qt, QProcess, QProcessEnvironment, QTimer, QRectF,
-                          QPoint, QPointF, QSize, QStandardPaths, QLockFile)
+                          QPoint, QPointF, QSize, QRect, QStandardPaths, QLockFile)
 from PyQt5.QtGui import (QColor, QFont, QFontMetricsF, QIcon, QPainter, QPainterPath, QPen,
                          QPixmap, QLinearGradient, QKeySequence)
 from PyQt5.QtWidgets import (QApplication, QWidget, QDialog, QVBoxLayout,
@@ -474,6 +475,7 @@ class QuotaCard(QWidget):
         self.drag_start=None
         self.hover=''
         self.controls={}
+        self.position_initialized=False
         self.available_buckets=[]
         self.bg_image=QPixmap(self.settings['image']) if self.settings['image'] else QPixmap()
         self.dialog=None
@@ -489,14 +491,16 @@ class QuotaCard(QWidget):
         screen=QApplication.primaryScreen().availableGeometry()
         x=self.settings['x']
         x=screen.right()-self.width()-32 if x is None else x
-        visible_rect=QRectF(x,self.settings['y'],self.width(),self.height())
-        if not any(visible_rect.intersects(QRectF(s.availableGeometry())) for s in QApplication.screens()):
-            x=screen.right()-self.width()-32;self.settings['y']=90
-        self.move(int(x),int(self.settings['y']))
+        self.constrain_to_screen(QPoint(int(x),int(self.settings['y'])))
+        self.position_initialized=True
         self.create_tray()
         self.timer=QTimer(self);self.timer.timeout.connect(self.tick);self.timer.start(1000)
         self.poll=QTimer(self);self.poll.timeout.connect(self.refresh);self.poll.start(self.settings['interval']*1000)
         self.client=UsageClient(self)
+        self.watched_screens=set()
+        self.watch_screens()
+        QApplication.instance().screenAdded.connect(self.screen_layout_changed)
+        QApplication.instance().screenRemoved.connect(self.screen_layout_changed)
         if not preview:
             self.shortcut=GlobalShortcut(QApplication.instance(),self.shortcut_activate)
             if not self.shortcut.register(self.settings['hotkey']):
@@ -524,9 +528,36 @@ class QuotaCard(QWidget):
         if self.windowFlags()!=flags:
             self.setWindowFlags(flags)
             if old_visibility:self.show()
+        if self.position_initialized:self.constrain_to_screen()
         if hasattr(self,'poll'):self.update_poll_interval()
         self.update()
         if save:self.save()
+
+    def constrain_to_screen(self, position=None, screen=None, snap=0):
+        position=self.pos() if position is None else position
+        screens=QApplication.screens()
+        if not screens:return
+        if screen is None:
+            areas=[s.availableGeometry() for s in screens]
+            screen=screens[screen_index(QRect(position,self.size()),areas)]
+        area=screen.availableGeometry()
+        w,h=(144,58) if self.settings['mini'] else (360,210 if self.settings['compact'] else 278)
+        scale=fitting_scale(self.settings['scale'],w,h,area)
+        if scale!=self.settings['scale']:
+            self.settings['scale']=scale
+            self.setFixedSize(round(w*scale/100),round(h*scale/100))
+        self.move(bounded_position(position,self.size(),area,snap))
+
+    def watch_screens(self):
+        for screen in QApplication.screens():
+            if screen not in self.watched_screens:
+                screen.availableGeometryChanged.connect(self.screen_layout_changed)
+                self.watched_screens.add(screen)
+
+    def screen_layout_changed(self,*args):
+        self.watch_screens()
+        self.constrain_to_screen()
+        self.update();self.save()
 
     def save(self):
         if self.preview:return
@@ -855,14 +886,10 @@ class QuotaCard(QWidget):
         self.setCursor(Qt.PointingHandCursor if hover else Qt.ArrowCursor)
         if self.drag_start is not None and event.buttons()&Qt.LeftButton:
             target=event.globalPos()-self.drag_start
-            # Snap each edge to its current monitor without forcing a primary monitor.
-            screen=QApplication.screenAt(event.globalPos()) or QApplication.primaryScreen();a=screen.availableGeometry()
-            x,y=target.x(),target.y()
-            for snap in (a.left()+12,a.right()-self.width()-12):
-                if abs(x-snap)<12:x=snap
-            for snap in (a.top()+12,a.bottom()-self.height()-12):
-                if abs(y-snap)<12:y=snap
-            self.move(x,y)
+            # Never allow any part of the card outside its monitor's work area.
+            # Cursor screen enables crossing to a second monitor; gaps recover
+            # against the nearest / most-overlapped monitor instead of primary.
+            self.constrain_to_screen(target,QApplication.screenAt(event.globalPos()),snap=8)
 
     def mouseReleaseEvent(self,event):
         if self.drag_start is not None:self.drag_start=None;self.save()
@@ -960,8 +987,16 @@ def main():
         card.settings['mini']=True;card.apply_settings(save=False);app.processEvents()
         mini=card.grab().size()
         ok=(normal==QSize(360,278) and mini==QSize(144,58))
+        screen=QApplication.primaryScreen();area=screen.availableGeometry()
+        bounds_ok=True
+        for mini_mode in (False,True):
+            card.settings.update(mini=mini_mode,scale=250);card.apply_settings(save=False)
+            for position in (QPoint(area.left()-1000,area.top()-1000),QPoint(area.right()+1000,area.bottom()+1000)):
+                card.constrain_to_screen(position,screen)
+                bounds_ok=bounds_ok and area.contains(card.geometry())
+        ok=ok and bounds_ok
         report={'ok':ok,'version':VERSION,'frozen':bool(getattr(sys,'frozen',False)),
-                'normal':[normal.width(),normal.height()],'mini':[mini.width(),mini.height()]}
+                'normal':[normal.width(),normal.height()],'mini':[mini.width(),mini.height()],'bounds_ok':bounds_ok}
         Path(args.self_test).write_text(json.dumps(report,indent=2),'utf-8')
         card.close()
         if not ok:raise RuntimeError('Packaged layout self-test failed')
