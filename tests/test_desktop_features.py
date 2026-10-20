@@ -164,9 +164,15 @@ class DesktopLayout(unittest.TestCase):
         with patch('quota_card.open_task_thread') as opener:
             self.card.open_task(task);opener.assert_not_called()
 
-    def test_acknowledged_running_task_still_uses_active_refresh(self):
+    def test_running_task_stays_visible_after_navigation(self):
         task=Task('a','1','A','running');self.card.tasks.update([task]);self.card.tasks.acknowledge(task)
-        self.assertEqual(self.card.tasks.label(),'暂无任务提醒')
+        with patch('quota_card.open_task_thread',return_value=True) as opener:
+            self.card.open_task(task)
+            self.card.open_task(task)
+            self.assertEqual(opener.call_count,2)
+        self.card.tasks.update([task])
+        self.assertEqual(self.card.tasks.label(),'1 个任务正在运行')
+        self.assertEqual(self.card.tasks.current_group()[1],[task])
         self.assertEqual(self.card.tasks.poll_seconds(3,300),3)
 
     def test_navigation_uses_exact_thread_uri_and_rejects_invalid_id(self):

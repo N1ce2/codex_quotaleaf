@@ -180,6 +180,8 @@ class TaskTracker:
         if task is None:
             self.completed.clear()
             return
+        if task.state == 'running':
+            return
         self.acknowledged.add((task.id,task.turn,task.state))
         current=self.completed.get(task.id)
         if current and current.turn==task.turn:self.completed.pop(task.id,None)
