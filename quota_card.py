@@ -11,22 +11,27 @@ import subprocess
 import sys
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from task_status import TaskTracker, read_tasks
+from desktop_controls import GlobalShortcut, open_task_thread
 
 from reset_cards import reset_inventory, reset_usable, populate_reset_menu, sync_reset_menu
 
 from PyQt5.QtCore import (Qt, QProcess, QProcessEnvironment, QTimer, QRectF,
                           QPoint, QPointF, QSize, QStandardPaths, QLockFile)
 from PyQt5.QtGui import (QColor, QFont, QFontMetricsF, QIcon, QPainter, QPainterPath, QPen,
-                         QPixmap, QLinearGradient)
+                         QPixmap, QLinearGradient, QKeySequence)
 from PyQt5.QtWidgets import (QApplication, QWidget, QDialog, QVBoxLayout,
     QHBoxLayout, QLabel, QPushButton, QCheckBox, QComboBox, QSlider,
-    QFileDialog, QColorDialog, QMenu, QSystemTrayIcon, QFrame, QMessageBox, QSpinBox)
+    QFileDialog, QColorDialog, QMenu, QSystemTrayIcon, QFrame, QMessageBox, QSpinBox,
+    QKeySequenceEdit, QScrollArea)
 
 BASE = Path(__file__).resolve().parent
 STATE = BASE / 'state'
 DEFAULTS = dict(x=None, y=90, scale=100, radius=24, opacity=92, image='',
     image_shade=52, accent='#a4d8c1', theme='石墨黑', topmost=True,
     locked=False, compact=False, show_reset=True, interval=3,
+    idle_interval=300, mini=False, click_through=False, hotkey='Ctrl+Alt+Q', task_notifications=True,
     autostart=False, bucket='codex', settings_version=2)
 PALETTES = {
     '石墨黑': ('#292929', '#f4f4f2', '#a8aaa8', '#464846'),
@@ -52,6 +57,7 @@ def load_settings():
     settings['radius'] = max(0, min(48, int(settings['radius'])))
     settings['opacity'] = max(20, min(100, int(settings['opacity'])))
     settings['interval'] = max(3, min(3600, int(settings['interval'])))
+    settings['idle_interval'] = max(3, min(86400, int(settings['idle_interval'])))
     if settings['theme'] not in PALETTES:
         settings['theme'] = '石墨黑'
     return settings
@@ -356,12 +362,22 @@ class SettingsDialog(QDialog):
             QComboBox {background:#343935;color:#edf3ed;border:1px solid #4c554d;border-radius:7px;padding:6px;}
             QComboBox QAbstractItemView {background:#343935;color:white;selection-background-color:#526b5c;}
             QSpinBox {background:#343935;color:#edf3ed;border:1px solid #4c554d;border-radius:7px;padding:6px;min-width:100px;}
+            QKeySequenceEdit,QKeySequenceEdit QLineEdit {background:#343935;color:#edf3ed;border:1px solid #4c554d;border-radius:7px;padding:5px;}
+            QScrollBar:vertical {background:#242625;width:8px;margin:0;}
+            QScrollBar::handle:vertical {background:#4c554d;min-height:30px;border-radius:4px;}
+            QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical {height:0;}
+            QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical {background:transparent;}
             QPushButton {background:#343b36;color:#edf3ed;border:1px solid #4c554d;border-radius:8px;padding:8px 12px;}
             QPushButton:hover {background:#455449;}
             QSlider::groove:horizontal {background:#444c46;height:4px;border-radius:2px;}
             QSlider::handle:horizontal {background:#b5dcc7;width:14px;margin:-5px 0;border-radius:7px;}
         ''')
-        layout = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        scroll=QScrollArea();scroll.setWidgetResizable(True)
+        scroll.setStyleSheet('QScrollArea{border:0;background:transparent;} QWidget#settingsContent{background:#242625;}')
+        content=QWidget();content.setObjectName('settingsContent');scroll.setWidget(content);outer.addWidget(scroll)
+        layout = QVBoxLayout(content)
+        self.resize(490,min(850,QApplication.primaryScreen().availableGeometry().height()-90))
         layout.setContentsMargins(26,22,26,22)
         layout.setSpacing(14)
         heading = QLabel('让额度卡片，融入你的桌面')
@@ -384,11 +400,26 @@ class SettingsDialog(QDialog):
             box=QCheckBox(label);box.setChecked(card.settings[key]);box.toggled.connect(lambda v,k=key:card.set_option(k,v));checks.addWidget(box)
         layout.addLayout(checks)
         reset=QCheckBox('显示重置倒计时');reset.setChecked(card.settings['show_reset']);reset.toggled.connect(lambda v:card.set_option('show_reset',v));layout.addWidget(reset)
-        refresh_row=QHBoxLayout();refresh_row.addWidget(QLabel('自动刷新（默认 3 秒）'));refresh_row.addStretch()
+        extras=QHBoxLayout()
+        for label,key in [('迷你模式','mini'),('鼠标穿透','click_through')]:
+            box=QCheckBox(label);box.setChecked(card.settings[key]);box.toggled.connect(lambda v,k=key:card.set_option(k,v));extras.addWidget(box)
+        layout.addLayout(extras)
+        shortcut_row=QHBoxLayout();shortcut_row.addWidget(QLabel('唤出 / 收起快捷键'))
+        shortcut=QKeySequenceEdit(QKeySequence(card.settings['hotkey']))
+        shortcut.editingFinished.connect(lambda:card.change_hotkey(shortcut))
+        shortcut_row.addWidget(shortcut);layout.addLayout(shortcut_row)
+        hint=QLabel('穿透时用快捷键或托盘恢复操作；再次按快捷键恢复穿透。')
+        hint.setWordWrap(True);layout.addWidget(hint)
+        notify=QCheckBox('任务完成 / 等待确认时发送通知');notify.setChecked(card.settings['task_notifications'])
+        notify.toggled.connect(lambda v:card.set_option('task_notifications',v));layout.addWidget(notify)
+        refresh_row=QHBoxLayout();refresh_row.addWidget(QLabel('任务运行时刷新（默认 3 秒）'));refresh_row.addStretch()
         refresh_spin=QSpinBox();refresh_spin.setRange(3,3600);refresh_spin.setSuffix(' 秒');refresh_spin.setValue(card.settings['interval'])
         refresh_spin.setKeyboardTracking(False)
         refresh_spin.valueChanged.connect(lambda v:card.set_option('interval',v))
         refresh_row.addWidget(refresh_spin);layout.addLayout(refresh_row)
+        idle_row=QHBoxLayout();idle_row.addWidget(QLabel('无运行任务时刷新（默认 300 秒）'));idle_row.addStretch()
+        idle=QSpinBox();idle.setRange(3,86400);idle.setSuffix(' 秒');idle.setValue(card.settings['idle_interval']);idle.setKeyboardTracking(False)
+        idle.valueChanged.connect(lambda v:card.set_option('idle_interval',v));idle_row.addWidget(idle);layout.addLayout(idle_row)
         buckets=card.available_buckets or ['codex']
         self.combo(layout,'额度分组','bucket',buckets)
         self.startup = QCheckBox('登录 Windows 时自动启动（可随时取消）')
@@ -400,7 +431,7 @@ class SettingsDialog(QDialog):
         bottom=QHBoxLayout()
         reset_btn=QPushButton('恢复默认外观');reset_btn.clicked.connect(self.reset_appearance)
         done=QPushButton('完成');done.clicked.connect(self.accept)
-        bottom.addWidget(reset_btn);bottom.addStretch();bottom.addWidget(done);layout.addLayout(bottom)
+        bottom.addWidget(reset_btn);bottom.addStretch();bottom.addWidget(done);outer.addLayout(bottom)
 
     def slider(self,layout,label,key,low,high,suffix):
         row=QHBoxLayout();title=QLabel(label);value=QLabel(str(self.card.settings[key])+suffix)
@@ -417,7 +448,7 @@ class SettingsDialog(QDialog):
         row.addWidget(combo);layout.addLayout(row)
 
     def reset_appearance(self):
-        for key in ('scale','radius','opacity','image','image_shade','accent','theme','compact','show_reset'):
+        for key in ('scale','radius','opacity','image','image_shade','accent','theme','compact','show_reset','mini'):
             self.card.settings[key]=DEFAULTS[key]
         self.card.bg_image=QPixmap()
         self.card.apply_settings()
@@ -429,6 +460,11 @@ class QuotaCard(QWidget):
         super().__init__()
         self.preview=preview
         self.settings=load_settings()
+        self.tasks=TaskTracker()
+        self.interactive_override=False
+        self.task_future=None
+        self.task_executor=None
+        self.shortcut=None
         self.payload={}
         self.last_success=None
         self.has_live_data=False
@@ -462,6 +498,12 @@ class QuotaCard(QWidget):
         self.poll=QTimer(self);self.poll.timeout.connect(self.refresh);self.poll.start(self.settings['interval']*1000)
         self.client=UsageClient(self)
         if not preview:
+            self.shortcut=GlobalShortcut(QApplication.instance(),self.shortcut_activate)
+            if not self.shortcut.register(self.settings['hotkey']):
+                self.tray.showMessage('快捷键不可用','快捷键被占用，可在设置中更改；仍可用托盘恢复操作。',QSystemTrayIcon.Warning,7000)
+            self.task_executor=ThreadPoolExecutor(max_workers=1,thread_name_prefix='task-status')
+            self.task_timer=QTimer(self);self.task_timer.timeout.connect(self.scan_tasks);self.task_timer.start(1000)
+            self.scan_tasks()
             try:
                 cache=json.loads((STATE/'usage-cache.json').read_text('utf-8'))
                 self.payload=cache['payload'];self.last_success=cache['timestamp']
@@ -472,14 +514,17 @@ class QuotaCard(QWidget):
 
     def apply_settings(self, save=True):
         scale=self.settings['scale']/100
-        self.setFixedSize(round(360*scale),round((210 if self.settings['compact'] else 278)*scale))
+        w,h=(144,58) if self.settings['mini'] else (360,210 if self.settings['compact'] else 278)
+        self.setFixedSize(round(w*scale),round(h*scale))
         old_visibility=self.isVisible()
         flags=Qt.FramelessWindowHint|Qt.Tool
         if self.settings['topmost']:flags|=Qt.WindowStaysOnTopHint
+        if self.settings['click_through'] and not self.interactive_override:
+            flags|=Qt.WindowTransparentForInput|Qt.WindowDoesNotAcceptFocus
         if self.windowFlags()!=flags:
             self.setWindowFlags(flags)
             if old_visibility:self.show()
-        if hasattr(self,'poll'):self.poll.setInterval(int(self.settings['interval'])*1000)
+        if hasattr(self,'poll'):self.update_poll_interval()
         self.update()
         if save:self.save()
 
@@ -490,6 +535,7 @@ class QuotaCard(QWidget):
 
     def set_option(self,key,value):
         self.settings[key]=value
+        if key=='click_through':self.interactive_override=False
         self.apply_settings()
         if key=='bucket':self.refresh()
 
@@ -506,6 +552,8 @@ class QuotaCard(QWidget):
         self.tray_menu=RoundedMenu(self)
         self.tray_menu.addAction('显示卡片',self.restore)
         self.tray_menu.addAction('隐藏卡片',self.hide)
+        self.tray_menu.addAction('切换迷你模式',lambda:self.set_option('mini',not self.settings['mini']))
+        self.tray_menu.addAction('恢复鼠标操作',self.restore)
         self.tray_menu.addAction('刷新额度',self.refresh)
         self.tray_menu.addAction('个性化设置',self.open_settings)
         self.tray_menu.addSeparator();self.tray_menu.addAction('退出',self.close)
@@ -513,7 +561,68 @@ class QuotaCard(QWidget):
         if not self.preview:self.tray.show()
 
     def restore(self):
-        self.show();self.raise_()
+        self.interactive_override=True;self.apply_settings(save=False)
+        self.show();self.raise_();self.activateWindow()
+
+    def shortcut_activate(self):
+        if not self.isVisible() or (self.settings['click_through'] and not self.interactive_override):
+            self.restore()
+        elif self.settings['click_through']:
+            self.interactive_override=False;self.apply_settings(save=False)
+        else:self.hide()
+
+    def change_hotkey(self, editor):
+        value=editor.keySequence().toString(QKeySequence.PortableText)
+        if self.preview or (self.shortcut and self.shortcut.register(value)):
+            self.set_option('hotkey',value)
+        else:
+            editor.setKeySequence(QKeySequence(self.settings['hotkey']))
+            QMessageBox.warning(self,'快捷键不可用','请使用 Ctrl / Alt / Win 加一个字母或数字的组合，且不能与其他程序冲突。')
+
+    def update_poll_interval(self):
+        seconds=self.tasks.poll_seconds(self.settings['interval'],self.settings['idle_interval'])
+        old=self.poll.interval()
+        if old!=seconds*1000:self.poll.setInterval(seconds*1000)
+        return old,seconds*1000
+
+    def scan_tasks(self):
+        if self.task_future and self.task_future.done():
+            try:
+                notices=self.tasks.update(self.task_future.result())
+                if self.settings['task_notifications']:
+                    waiting=sum(kind=='waiting' for kind,_ in notices)
+                    done=sum(kind=='completed' for kind,_ in notices)
+                    if waiting or done:
+                        text=f'有 {waiting} 个任务等待确认' if waiting else f'有 {done} 个任务已完成'
+                        self.tray.showMessage('Codex 任务',text,QSystemTrayIcon.Information,5000)
+            except Exception:
+                self.tasks.error='任务状态不可用'
+            self.task_future=None
+            old,new=self.update_poll_interval()
+            if new<old:self.refresh()
+            self.update()
+        if self.task_future is None and self.task_executor:
+            self.task_future=self.task_executor.submit(read_tasks)
+
+    def open_task_menu(self,point):
+        state,tasks=self.tasks.current_group()
+        if not tasks:return
+        if len(tasks)==1:
+            self.open_task(tasks[0]);return
+        menu=RoundedMenu(self)
+        label={'waiting':'等待确认','running':'正在运行','completed':'已完成'}[state]
+        for task in tasks:
+            action=menu.addAction(f'{label} · {task.title[:40]}',lambda checked=False,t=task:self.open_task(t))
+            action.setToolTip(task.title)
+        menu.exec_(point);menu.deleteLater();self.hover='';self.update()
+
+    def open_task(self, task):
+        # Recheck the selected task: a menu may have remained open across a turn change.
+        state,tasks=self.tasks.current_group()
+        if not any((t.id,t.turn,t.state)==(task.id,task.turn,task.state) for t in tasks):return
+        if open_task_thread(task.id):
+            self.tasks.acknowledge(task);self.update()
+        else:self.tray.showMessage('无法打开任务','未能打开 Codex 任务链接，提醒已保留。请确认桌面应用已安装。',QSystemTrayIcon.Warning,5000)
 
     def connection_status(self,text):
         self.refreshing=True;self.status=text;self.update()
@@ -618,8 +727,10 @@ class QuotaCard(QWidget):
     def paintEvent(self,event):
         p=QPainter(self);p.setRenderHint(QPainter.Antialiasing);p.setRenderHint(QPainter.SmoothPixmapTransform)
         p.scale(self.settings['scale']/100,self.settings['scale']/100)
-        bg,fg,muted,line=self.palette_values();w,h=360,210 if self.settings['compact'] else 278
+        bg,fg,muted,line=self.palette_values()
+        w,h=(144,58) if self.settings['mini'] else (360,210 if self.settings['compact'] else 278)
         rect=QRectF(1,1,w-2,h-2);radius=self.settings['radius']
+        if self.settings['mini']:radius=(h-2)/2
         clip=QPainterPath();clip.addRoundedRect(rect,radius,radius)
         p.setClipPath(clip)
         bg.setAlphaF(self.settings['opacity']/100);p.fillPath(clip,bg)
@@ -632,11 +743,30 @@ class QuotaCard(QWidget):
             line.setAlpha(45)
         p.setClipping(False)
         accent=QColor(self.settings['accent']);bucket,_=extract_bucket(self.payload,self.settings['bucket'])
+        if self.settings['mini']:
+            self.controls={'menu':QRectF(108,31,20,20),'tasks':QRectF(22,31,80,20)}
+            values=[remaining((bucket or {}).get(key)) for key in ('primary','secondary')]
+            x=14
+            for prefix,value,width in zip(('5h','周'),values,(60,54)):
+                color=QColor('#f06464') if value is not None and value<20 else accent
+                text=f'{prefix} {value:.0f}%' if value is not None else f'{prefix} —'
+                self.draw_text(p,x,5,width,24,text,9,color,True);x+=width
+            for name,area in self.controls.items():
+                if self.hover==name:
+                    hover=QColor(fg);hover.setAlpha(16);p.setPen(Qt.NoPen);p.setBrush(hover);p.drawRoundedRect(area,6,6)
+            self.icon(p,'menu',self.controls['menu'],muted)
+            waiting,done,running=self.tasks.counts()
+            color=QColor('#e8bd76') if waiting else accent if done else muted
+            text=QFontMetricsF(QFont('Microsoft YaHei UI',8)).elidedText(self.tasks.mini_label(),Qt.ElideRight,76)
+            self.draw_text(p,24,31,76,20,text,8,color,False,Qt.AlignCenter)
+            p.end();return
         settings_y=h-35 if self.settings['compact'] else h-43
         count,_=reset_inventory(self.payload)
         label=f'剩余 {count if count is not None else "—"} 张重置卡'
         label_width=QFontMetricsF(QFont('Microsoft YaHei UI',9)).horizontalAdvance(label)
         self.controls={'pin':QRectF(w-96,16,24,26),'refresh':QRectF(w-66,16,24,26),'menu':QRectF(w-36,16,24,26),'settings':QRectF(w-42,settings_y,26,27),'reset_cards':QRectF(18,settings_y,label_width+12,27)}
+        status_x=max(163,self.controls['reset_cards'].right()+5)
+        self.controls['tasks']=QRectF(status_x,settings_y,w-44-status_x,27)
         # Gauge emblem deliberately follows the reference's fine strokes.
         p.setPen(QPen(accent,1.7,Qt.SolidLine,Qt.RoundCap));p.drawArc(QRectF(23,23,17,17),-25*16,230*16)
         p.drawLine(QPoint(31,32),QPoint(38,24));p.drawEllipse(QRectF(29,30,3,3))
@@ -647,7 +777,7 @@ class QuotaCard(QWidget):
                 p.setPen(Qt.NoPen);p.setBrush(hover)
                 button_radius=min(radius,area.width()/2,area.height()/2)
                 p.drawRoundedRect(area,button_radius,button_radius)
-            if name in ('settings','reset_cards'):continue
+            if name in ('settings','reset_cards','tasks'):continue
             col=accent if name=='pin' and self.settings['topmost'] else muted
             self.icon(p,name,area,col)
         compact=self.settings['compact']
@@ -676,6 +806,11 @@ class QuotaCard(QWidget):
             if val is not None and val>0:
                 p.setBrush(color);p.drawRoundedRect(QRectF(24,track_y,(w-48)*val/100,3),1.5,1.5)
         self.draw_text(p,24,settings_y,label_width+1,27,label,9,muted)
+        area=self.controls['tasks'];text=self.tasks.label();size=8
+        while size>6 and QFontMetricsF(QFont('Microsoft YaHei UI',size)).horizontalAdvance(text)>area.width()-6:size-=1
+        waiting,done,running=self.tasks.counts()
+        status_color=QColor('#e8bd76') if waiting else accent if done else muted
+        self.draw_text(p,area.x()+3,area.y(),area.width()-6,27,text,size,status_color,False,Qt.AlignCenter)
         self.icon(p,'settings',self.controls['settings'],muted)
         p.end()
         if bucket:
@@ -694,12 +829,15 @@ class QuotaCard(QWidget):
         elif control=='refresh':self.refresh()
         elif control=='settings':self.open_settings()
         elif control=='reset_cards':self.open_reset_cards()
+        elif control=='tasks':self.open_task_menu(event.globalPos())
         elif control=='menu':self.open_menu(event.globalPos())
         elif not self.settings['locked']:self.drag_start=event.globalPos()-self.frameGeometry().topLeft()
 
     def mouseMoveEvent(self,event):
         hover=self.control_at(event.pos())
-        if hover!=self.hover:self.hover=hover;self.update()
+        if hover!=self.hover:
+            self.hover=hover;self.update()
+            self.setToolTip(self.tasks.label()+' · 点击打开对应任务' if hover=='tasks' else '拖动移动 · 双击展开或设置 · 右键查看更多操作')
         self.setCursor(Qt.PointingHandCursor if hover else Qt.ArrowCursor)
         if self.drag_start is not None and event.buttons()&Qt.LeftButton:
             target=event.globalPos()-self.drag_start
@@ -720,14 +858,17 @@ class QuotaCard(QWidget):
         super().leaveEvent(event)
 
     def mouseDoubleClickEvent(self,event):
-        if not self.control_at(event.pos()):self.open_settings()
+        if not self.control_at(event.pos()):
+            if self.settings['mini']:self.set_option('mini',False)
+            else:self.open_settings()
 
     def contextMenuEvent(self,event):self.open_menu(event.globalPos())
 
     def open_menu(self,point):
         menu=RoundedMenu(self)
-        for text,key in [('锁定位置','locked'),('紧凑模式','compact')]:
+        for text,key in [('锁定位置','locked'),('紧凑模式','compact'),('迷你模式','mini'),('鼠标穿透','click_through')]:
             action=menu.addAction(text);action.setCheckable(True);action.setChecked(self.settings[key]);action.toggled.connect(lambda v,k=key:self.set_option(k,v))
+        if self.settings['mini']:menu.addAction('额度重置卡…',self.open_reset_cards)
         menu.addSeparator();menu.addAction('更换背景图片…',self.choose_background);menu.addAction('外观与个性化…',self.open_settings)
         menu.addAction('隐藏到托盘',self.hide)
         menu.addSeparator();menu.addAction('退出卡片',self.close)
@@ -750,6 +891,7 @@ class QuotaCard(QWidget):
         if color.isValid():self.set_option('accent',color.name())
 
     def open_settings(self):
+        if self.settings['click_through']:self.restore()
         if self.dialog:
             self.dialog.show();self.dialog.raise_();self.dialog.activateWindow();return
         self.dialog=SettingsDialog(self)
@@ -779,6 +921,9 @@ class QuotaCard(QWidget):
                 self.dialog.startup.blockSignals(True);self.dialog.startup.setChecked(self.settings['autostart']);self.dialog.startup.blockSignals(False)
 
     def closeEvent(self,event):
+        if hasattr(self,'task_timer'):self.task_timer.stop()
+        if self.task_executor:self.task_executor.shutdown(wait=False,cancel_futures=True);self.task_executor=None
+        if self.shortcut:self.shortcut.close();self.shortcut=None
         self.save();self.poll.stop();self.client.stop();self.tray.hide()
         event.accept();QApplication.quit()
 
