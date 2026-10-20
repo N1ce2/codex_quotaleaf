@@ -13,7 +13,7 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QApplication
 from quota_card import QuotaCard, DEFAULTS
 from task_status import Task, TaskTracker, pending_input, read_tasks
-from desktop_controls import shortcut_parts, open_task_thread
+from desktop_controls import shortcut_parts, open_task_thread, open_codex_app
 
 
 class TaskLogic(unittest.TestCase):
@@ -187,6 +187,26 @@ class DesktopLayout(unittest.TestCase):
             self.card.tasks=TaskTracker(started_at=0)
             self.card.tasks.update([Task('a','1','A',state,1)])
             self.assertEqual(self.card.task_text_color('#999999').name(),color)
+
+    def test_title_click_region_is_codex_only(self):
+        from PyQt5.QtCore import QPoint
+        self.card.show();self.app.processEvents();self.card.grab()
+        area=self.card.controls['codex']
+        self.assertEqual(self.card.control_at(QPoint(round(area.center().x()),30)),'codex')
+        self.assertNotEqual(self.card.control_at(QPoint(round(area.right()+15),30)),'codex')
+        with patch('quota_card.open_codex_app',return_value=True) as opener:
+            self.card.open_codex();opener.assert_called_once()
+
+    def test_codex_launch_uses_registered_app_not_new_chat(self):
+        from types import SimpleNamespace
+        with patch('desktop_controls.sys.platform','win32'),patch('subprocess.run',return_value=SimpleNamespace(returncode=0,stdout='OpenAI.Codex_example!App\n')),patch('os.startfile',create=True) as start:
+            self.assertTrue(open_codex_app())
+            start.assert_called_once_with('shell:AppsFolder\\OpenAI.Codex_example!App')
+
+    def test_invalid_app_registration_is_not_executed(self):
+        from types import SimpleNamespace
+        with patch('desktop_controls.sys.platform','win32'),patch('subprocess.run',return_value=SimpleNamespace(returncode=0,stdout='unexpected.exe')),patch('os.startfile',create=True) as start:
+            self.assertFalse(open_codex_app());start.assert_not_called()
 
 
 if __name__=='__main__':unittest.main()

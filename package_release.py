@@ -3,6 +3,7 @@ import hashlib
 from pathlib import Path
 import sys
 import zipfile
+from app_runtime import VERSION
 
 
 def main():
@@ -25,7 +26,7 @@ def main():
     with zipfile.ZipFile(archive,'w',zipfile.ZIP_DEFLATED) as bundle:
         for name,path in files.items():bundle.write(path,name)
     sums=[]
-    source=root/'dist/codex_quotaleaf-source-v0.1.0.zip'
+    source=root/f'dist/codex_quotaleaf-source-v{VERSION}.zip'
     for path in [files['codex_quotaleaf.exe'],archive]+([source] if source.is_file() else []):
         sums.append(hashlib.sha256(path.read_bytes()).hexdigest()+'  '+path.name)
     (root/'dist/SHA256SUMS.txt').write_text('\n'.join(sums)+'\n','utf-8')

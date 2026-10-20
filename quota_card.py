@@ -13,7 +13,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from task_status import TaskTracker, read_tasks
-from desktop_controls import GlobalShortcut, open_task_thread
+from desktop_controls import GlobalShortcut, open_task_thread, open_codex_app
 from app_runtime import runtime_paths, startup_target, VERSION
 
 from reset_cards import reset_inventory, reset_usable, populate_reset_menu, sync_reset_menu
@@ -624,6 +624,10 @@ class QuotaCard(QWidget):
             self.tasks.acknowledge(task);self.update()
         else:self.tray.showMessage('无法打开任务','未能打开 Codex 任务链接，提醒已保留。请确认桌面应用已安装。',QSystemTrayIcon.Warning,5000)
 
+    def open_codex(self):
+        if not open_codex_app():
+            self.tray.showMessage('无法打开 Codex','未找到 Codex 桌面应用的系统启动入口，请确认已安装桌面应用。',QSystemTrayIcon.Warning,5000)
+
     def connection_status(self,text):
         self.refreshing=True;self.status=text;self.update()
 
@@ -774,8 +778,13 @@ class QuotaCard(QWidget):
         # Gauge emblem deliberately follows the reference's fine strokes.
         p.setPen(QPen(accent,1.7,Qt.SolidLine,Qt.RoundCap));p.drawArc(QRectF(23,23,17,17),-25*16,230*16)
         p.drawLine(QPoint(31,32),QPoint(38,24));p.drawEllipse(QRectF(29,30,3,3))
-        self.draw_text(p,49,16,w-165,29,'剩余额度',12,fg,True)
+        title_font=QFont('Microsoft YaHei UI',12);title_font.setWeight(QFont.DemiBold)
+        codex_width=QFontMetricsF(title_font).horizontalAdvance('Codex')
+        self.controls['codex']=QRectF(47,16,codex_width+4,29)
+        self.draw_text(p,49,16,codex_width+1,29,'Codex',12,accent if self.hover=='codex' else fg,True)
+        self.draw_text(p,49+codex_width,16,100,29,'仪表盘',12,fg,True)
         for name,area in self.controls.items():
+            if name=='codex':continue
             if self.hover==name:
                 hover=QColor(fg);hover.setAlpha(16)
                 p.setPen(Qt.NoPen);p.setBrush(hover)
@@ -835,13 +844,14 @@ class QuotaCard(QWidget):
         elif control=='reset_cards':self.open_reset_cards()
         elif control=='tasks':self.open_task_menu(event.globalPos())
         elif control=='menu':self.open_menu(event.globalPos())
+        elif control=='codex':self.open_codex()
         elif not self.settings['locked']:self.drag_start=event.globalPos()-self.frameGeometry().topLeft()
 
     def mouseMoveEvent(self,event):
         hover=self.control_at(event.pos())
         if hover!=self.hover:
             self.hover=hover;self.update()
-            self.setToolTip(self.tasks.label()+' · 点击打开对应任务' if hover=='tasks' else '拖动移动 · 双击展开或设置 · 右键查看更多操作')
+            self.setToolTip('点击唤出 Codex 窗口' if hover=='codex' else self.tasks.label()+' · 点击打开对应任务' if hover=='tasks' else '拖动移动 · 双击展开或设置 · 右键查看更多操作')
         self.setCursor(Qt.PointingHandCursor if hover else Qt.ArrowCursor)
         if self.drag_start is not None and event.buttons()&Qt.LeftButton:
             target=event.globalPos()-self.drag_start

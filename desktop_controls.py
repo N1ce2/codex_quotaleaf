@@ -5,6 +5,24 @@ from uuid import UUID
 from PyQt5.QtCore import QAbstractNativeEventFilter
 
 
+def open_codex_app():
+    """Activate the registered desktop app without opening a chat or installer."""
+    import os
+    import re
+    import subprocess
+    if sys.platform != 'win32':return False
+    try:
+        result=subprocess.run(['powershell.exe','-NoProfile','-NonInteractive','-Command',
+            "Get-StartApps | Where-Object { $_.AppID -like 'OpenAI.Codex_*!App' } | Select-Object -First 1 -ExpandProperty AppID"],
+            capture_output=True,text=True,timeout=5,creationflags=subprocess.CREATE_NO_WINDOW)
+        app_id=result.stdout.strip()
+        if result.returncode or not re.fullmatch(r'OpenAI\.Codex_[A-Za-z0-9]+!App',app_id):return False
+        os.startfile('shell:AppsFolder\\'+app_id)
+        return True
+    except (OSError,subprocess.SubprocessError):
+        return False
+
+
 def open_task_thread(thread_id):
     """Dispatch only a validated, official local-thread deep link to Windows."""
     import os
