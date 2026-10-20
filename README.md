@@ -17,6 +17,7 @@
 | 智能刷新 | 运行时默认 3 秒，无运行任务时默认 300 秒，两项独立设置；检测到运行任务后立即刷新 |
 | 任务状态 | 底部显示任务数量，每秒独立检测，优先级为等待确认 > 已完成 > 正在运行 |
 | 任务通知 | 完成或可识别的等待确认事件发送托盘通知，可在设置中关闭 |
+| 任务颜色 | 正在运行白色、等待确认橙色、已完成绿色；不随自定义强调色改变 |
 | 鼠标穿透 | 不挡下方窗口，快捷键或托盘可恢复操作 |
 | 全局快捷键 | 默认 Ctrl+Alt+Q，可改为 Ctrl / Alt / Win 加字母或数字 |
 | 迷你模式 | 144×58 两行小胶囊（100% 缩放），上排双额度，下排任务状态与更多菜单；双击空白处展开 |
@@ -35,11 +36,22 @@
 ### 环境要求
 
 - **Windows 10 / 11**，其他系统尚未验证。
-- **Python 3.10+**，包含 `pip`。
+- 使用 EXE 无需安装 Python；只有源码运行 / 自行打包需要 **Python 3.10+** 和 `pip`。
 - 已安装 [OpenAI Codex](https://github.com/openai/codex)，并使用 **ChatGPT 账号**完成登录。
 - 可以访问 Codex 服务的网络连接。
 
-### 安装
+### 下载 EXE（推荐分享方式）
+
+前往 [Releases](https://github.com/N1ce2/codex_quotaleaf/releases)，下载 Windows x64 分享包，解压后双击 `codex_quotaleaf.exe`。
+无需安装 Python 或 PyQt5，不需要管理员权限；收件人仍需自行安装 Codex 并登录自己的 ChatGPT 账号。
+分享包不包含作者账号、额度缓存、个人设置或背景图片。请保留包内的许可证与第三方说明，分享时建议直接转发完整 ZIP。
+
+EXE 设置位于 `%LOCALAPPDATA%\codex_quotaleaf\state\`，移动 EXE 不会丢失设置。背景图片仍从所选原路径读取。
+源码版继续使用项目内 `state/`，两种方式不会自动迁移设置。
+
+程序尚未进行代码签名，Windows 可能显示未知发布者提示；请从本仓库 Release 下载并核对 SHA256，勿关闭系统安全防护。单文件 EXE 首次启动需要解压运行组件，可能比源码版稍慢。
+
+### 源码安装
 
 ```powershell
 git clone https://github.com/N1ce2/codex_quotaleaf.git
@@ -57,7 +69,7 @@ python -m venv .venv
 安装依赖后，双击 **`launch.vbs`** 或 **`启动额度卡片.vbs`** 即可启动，不弹出终端窗口。
 启动器优先使用项目内 `.venv`，否则使用 PATH 中的 `pythonw.exe`。
 
-目前提供源码运行方式，尚无独立 `.exe` 安装包。请保留整个项目文件夹，不要只复制启动器。
+使用源码启动器时请保留整个项目文件夹，不要只复制启动器；EXE 版直接双击可执行文件。
 
 ## 操作指南
 
@@ -159,6 +171,28 @@ python -m venv .venv
 
 ## 开发与验证
 
+### 自行打包 Windows EXE
+
+在 Windows x64、Python 3.11 环境运行：
+
+```powershell
+.\build.ps1
+# 指定已有的 Python 解释器：.\build.ps1 -Python C:\Python311\python.exe
+```
+
+脚本会创建独立 `.build-venv`、安装打包依赖、运行测试，并依据 `codex_quotaleaf.spec` 生成 `dist/codex_quotaleaf.exe`。无需管理员权限。
+打包仅包含程序和运行库，不使用整个项目目录作为资源输入，不会把 `state/`、Codex 登录信息、私人截图或背景图装入 EXE。
+
+可离线验证打包产物（不会请求额度或注册开机启动）：
+
+```powershell
+.\dist\codex_quotaleaf.exe --self-test "$PWD\dist\self-test.json"
+```
+
+通过后报告包含 `ok: true`、`frozen: true` 和两种布局尺寸。EXE 测试报告及私人联网截图不应加入发布包。
+
+### 运行测试
+
 ```powershell
 # 额度换算、空值、多分组与重置倒计时测试
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
@@ -175,6 +209,9 @@ codex_quotaleaf/
 ├── reset_cards.py       # 重置卡详情和使用确认
 ├── task_status.py       # 本地任务状态与刷新策略
 ├── desktop_controls.py # Windows 全局快捷键
+├── app_runtime.py      # EXE 数据路径和启动适配
+├── build.ps1           # 独立环境打包脚本
+├── codex_quotaleaf.spec # 单文件 EXE 配置
 ├── requirements.txt    # Python 依赖
 ├── launch.vbs          # Windows 无终端启动器
 ├── quota-card.ico      # 应用图标
@@ -183,6 +220,10 @@ codex_quotaleaf/
 ```
 
 欢迎在 [Issues](https://github.com/N1ce2/codex_quotaleaf/issues) 反馈建议或问题。请提供 Windows、Python、Codex 版本与复现步骤，并去除私人信息。
+
+## 许可证
+
+本项目采用 [GNU GPLv3](LICENSE)。第三方运行库的许可和源码入口见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ---
 

@@ -181,5 +181,12 @@ class DesktopLayout(unittest.TestCase):
             self.assertTrue(open_task_thread(tid));start.assert_called_once_with('codex://threads/'+tid)
             self.assertFalse(open_task_thread('../settings'));self.assertEqual(start.call_count,1)
 
+    def test_task_colors_are_fixed_and_ignore_custom_accent(self):
+        self.card.settings['accent']='#ff00ff'
+        for state,color in [('running','#ffffff'),('waiting','#f5a34d'),('completed','#7dcc9e')]:
+            self.card.tasks=TaskTracker(started_at=0)
+            self.card.tasks.update([Task('a','1','A',state,1)])
+            self.assertEqual(self.card.task_text_color('#999999').name(),color)
+
 
 if __name__=='__main__':unittest.main()

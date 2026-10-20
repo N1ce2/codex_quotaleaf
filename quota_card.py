@@ -14,6 +14,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from task_status import TaskTracker, read_tasks
 from desktop_controls import GlobalShortcut, open_task_thread
+from app_runtime import runtime_paths, startup_target, VERSION
 
 from reset_cards import reset_inventory, reset_usable, populate_reset_menu, sync_reset_menu
 
@@ -26,8 +27,7 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QDialog, QVBoxLayout,
     QFileDialog, QColorDialog, QMenu, QSystemTrayIcon, QFrame, QMessageBox, QSpinBox,
     QKeySequenceEdit, QScrollArea)
 
-BASE = Path(__file__).resolve().parent
-STATE = BASE / 'state'
+BASE, STATE = runtime_paths()
 DEFAULTS = dict(x=None, y=90, scale=100, radius=24, opacity=92, image='',
     image_shade=52, accent='#a4d8c1', theme='石墨黑', topmost=True,
     locked=False, compact=False, show_reset=True, interval=3,
@@ -64,7 +64,7 @@ def load_settings():
 
 
 def atomic_json(file, value):
-    STATE.mkdir(exist_ok=True)
+    STATE.mkdir(parents=True,exist_ok=True)
     temp = file.with_suffix('.tmp')
     temp.write_text(json.dumps(value, ensure_ascii=False, indent=2), 'utf-8')
     os.replace(temp, file)
@@ -188,7 +188,7 @@ class UsageClient(QWidget):
 
     def initialize(self):
         self.send({'id':1, 'method':'initialize', 'params':{'clientInfo':{
-            'name':'quota_card', 'title':'Quota Card', 'version':'1.0.0'}}})
+            'name':'quota_card', 'title':'Quota Card', 'version':VERSION}}})
 
     def receive(self):
         self.buffer += bytes(self.proc.readAllStandardOutput())
@@ -681,6 +681,10 @@ class QuotaCard(QWidget):
         bg,fg,muted,line=PALETTES[self.settings['theme']]
         return QColor(bg),QColor(fg),QColor(muted),QColor(line)
 
+    def task_text_color(self, muted):
+        state,_=self.tasks.current_group()
+        return QColor({'running':'#ffffff','waiting':'#f5a34d','completed':'#7dcc9e'}.get(state,muted))
+
     def draw_text(self,p,x,y,w,h,text,size=10,color='#fff',bold=False,align=Qt.AlignLeft|Qt.AlignVCenter):
         font=QFont('Microsoft YaHei UI',size);font.setWeight(QFont.DemiBold if bold else QFont.Normal)
         p.setFont(font);p.setPen(QColor(color))
@@ -756,7 +760,7 @@ class QuotaCard(QWidget):
                     hover=QColor(fg);hover.setAlpha(16);p.setPen(Qt.NoPen);p.setBrush(hover);p.drawRoundedRect(area,6,6)
             self.icon(p,'menu',self.controls['menu'],muted)
             waiting,done,running=self.tasks.counts()
-            color=QColor('#e8bd76') if waiting else accent if done else muted
+            color=self.task_text_color(muted)
             text=QFontMetricsF(QFont('Microsoft YaHei UI',8)).elidedText(self.tasks.mini_label(),Qt.ElideRight,76)
             self.draw_text(p,24,31,76,20,text,8,color,False,Qt.AlignCenter)
             p.end();return
@@ -809,7 +813,7 @@ class QuotaCard(QWidget):
         area=self.controls['tasks'];text=self.tasks.label();size=8
         while size>6 and QFontMetricsF(QFont('Microsoft YaHei UI',size)).horizontalAdvance(text)>area.width()-6:size-=1
         waiting,done,running=self.tasks.counts()
-        status_color=QColor('#e8bd76') if waiting else accent if done else muted
+        status_color=self.task_text_color(muted)
         self.draw_text(p,area.x()+3,area.y(),area.width()-6,27,text,size,status_color,False,Qt.AlignCenter)
         self.icon(p,'settings',self.controls['settings'],muted)
         p.end()
@@ -905,10 +909,10 @@ class QuotaCard(QWidget):
         try:
             startup=Path(os.environ['APPDATA'])/'Microsoft/Windows/Start Menu/Programs/Startup/GPT Quota Card.lnk'
             if enabled:
-                pythonw=Path(sys.executable).with_name('pythonw.exe')
+                target,arguments=startup_target()
                 def q(s):return "'"+str(s).replace("'","''")+"'"
                 command=(f'$s=(New-Object -ComObject WScript.Shell).CreateShortcut({q(startup)});'
-                    f'$s.TargetPath={q(pythonw)};$s.Arguments={q(chr(34)+str(BASE/"quota_card.py")+chr(34))};'
+                    f'$s.TargetPath={q(target)};$s.Arguments={q(arguments)};'
                     f'$s.WorkingDirectory={q(BASE)};$s.Description="GPT Quota Card";$s.Save()')
                 subprocess.run(['powershell.exe','-NoProfile','-Command',command],check=True,
                     creationflags=subprocess.CREATE_NO_WINDOW,capture_output=True)
@@ -929,13 +933,30 @@ class QuotaCard(QWidget):
 
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--preview');parser.add_argument('--settings-preview');parser.add_argument('--probe',action='store_true');parser.add_argument('--snapshot')
+    parser=argparse.ArgumentParser();parser.add_argument('--preview');parser.add_argument('--settings-preview');parser.add_argument('--probe',action='store_true');parser.add_argument('--snapshot');parser.add_argument('--self-test',metavar='REPORT_JSON')
     args=parser.parse_args()
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
     app=QApplication(sys.argv);app.setQuitOnLastWindowClosed(False)
     app.setApplicationName('GPT Quota Card')
-    STATE.mkdir(exist_ok=True)
+    if args.self_test:
+        # Offline packaged smoke test: no Codex query, credentials, startup entry,
+        # global hotkey registration or personal settings are changed.
+        card=QuotaCard(preview=True)
+        card.settings=dict(DEFAULTS);card.bg_image=QPixmap();card.apply_settings(save=False)
+        card.accept_usage({'rateLimits':{'primary':{'usedPercent':12},'secondary':{'usedPercent':34}}})
+        card.show();app.processEvents()
+        normal=card.grab().size()
+        card.settings['mini']=True;card.apply_settings(save=False);app.processEvents()
+        mini=card.grab().size()
+        ok=(normal==QSize(360,278) and mini==QSize(144,58))
+        report={'ok':ok,'version':VERSION,'frozen':bool(getattr(sys,'frozen',False)),
+                'normal':[normal.width(),normal.height()],'mini':[mini.width(),mini.height()]}
+        Path(args.self_test).write_text(json.dumps(report,indent=2),'utf-8')
+        card.close()
+        if not ok:raise RuntimeError('Packaged layout self-test failed')
+        return
+    STATE.mkdir(parents=True,exist_ok=True)
     lock=None
     if not args.preview and not args.settings_preview and not args.probe:
         lock=QLockFile(str(STATE/'instance.lock'));lock.setStaleLockTime(30000)
@@ -970,6 +991,6 @@ if __name__=='__main__':
     try:main()
     except Exception:
         import traceback
-        STATE.mkdir(exist_ok=True)
+        STATE.mkdir(parents=True,exist_ok=True)
         (STATE/'error.log').write_text(traceback.format_exc(),'utf-8')
         raise

@@ -6,6 +6,7 @@ state/
 __pycache__/
 *.py[cod]
 .venv/
+.build-venv/
 venv/
 .env
 .env.*
@@ -14,6 +15,7 @@ venv/
 build/
 dist/
 *.spec
+!codex_quotaleaf.spec
 /实时卡片.png
 /外观预览.png
 /设置预览.png
