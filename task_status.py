@@ -1,34 +1,117 @@
 """Read-only local task projection. No conversations, prompts or credentials are saved."""
 from __future__ import annotations
 
-from dataclasses import dataclass
-from contextlib import closing
 import json
 import os
-from pathlib import Path
 import sqlite3
 import time
-
+from contextlib import closing
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any, BinaryIO
 
 WAIT_TOOLS = {'request_user_input', 'request_user_input_async', 'request_permissions'}
-_PENDING_CACHE = {}
+@dataclass(frozen=True)
+class _RolloutTurn:
+    id: str
+    state: str
+    started_at: float
+    completed_at: float = 0
 
 
-def pending_input(path):
-    """Only explicit pending input/approval events count; slow tools never imply approval."""
-    pending = {}
+@dataclass
+class _RolloutCache:
+    stamp: tuple[int, int, int]
+    pending: dict[str, str]
+    offset: int
+    turn: _RolloutTurn | None
+
+
+_PENDING_CACHE: dict[str, _RolloutCache] = {}
+
+
+def _event_time(value: object) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace('Z', '+00:00')).timestamp()
+        except (ValueError, OverflowError, OSError):
+            pass
+    return 0
+
+
+def _rollout_turn(record: dict[str, Any], previous: _RolloutTurn | None) -> _RolloutTurn | None:
+    if record.get('type') != 'event_msg':
+        return previous
+    payload = record.get('payload') or {}
+    states = {'task_started': 'running', 'task_complete': 'completed',
+              'turn_aborted': 'interrupted'}
+    state = states.get(payload.get('type', ''))
+    turn_id = payload.get('turn_id')
+    if state is None or not isinstance(turn_id, str) or not turn_id:
+        return previous
+    same_turn = previous is not None and previous.id == turn_id
+    started = _event_time(payload.get('started_at'))
+    if not started and same_turn and previous is not None:
+        started = previous.started_at
+    if not started and state == 'running':
+        started = _event_time(record.get('timestamp'))
+    completed = (_event_time(payload.get('completed_at')) or
+                 _event_time(record.get('timestamp'))) if state == 'completed' else 0
+    # A late terminal event for an older turn cannot end the current turn.
+    if previous is None or same_turn or started > previous.started_at:
+        return _RolloutTurn(turn_id, state, started, completed)
+    return previous
+
+
+def _find_turn_before(stream: BinaryIO, end: int) -> _RolloutTurn | None:
+    """Find a lifecycle marker outside the initial tail without parsing all chat items."""
+    while end > 0:
+        start = max(0, end - 2_000_000)
+        stream.seek(start)
+        if start:
+            stream.readline()
+        size = end - stream.tell()
+        if size > 0:
+            data = stream.read(size)
+            if not data.endswith(b'\n'):
+                data += stream.readline()
+            for line in reversed(data.splitlines()):
+                if not any(marker in line for marker in (
+                    b'"task_started"', b'"task_complete"', b'"turn_aborted"'
+                )):
+                    continue
+                try:
+                    turn = _rollout_turn(json.loads(line), None)
+                except (ValueError, UnicodeError):
+                    continue
+                if turn is not None:
+                    return turn
+        end = start
+    return None
+
+
+def _read_rollout(path: str | Path) -> tuple[bool, _RolloutTurn | None]:
+    """Read lifecycle and input events together, incrementally and without saving content."""
+    pending: dict[str, str] = {}
+    turn = None
     try:
         stat=Path(path).stat()
-        stamp=(stat.st_mtime_ns,stat.st_size)
+        stamp=(stat.st_mtime_ns,stat.st_size,stat.st_ino)
         cached=_PENDING_CACHE.get(str(path))
-        if cached and cached['stamp'] == stamp:return bool(cached['pending'])
+        if cached and cached.stamp == stamp:
+            return bool(cached.pending), cached.turn
         with Path(path).open('rb') as stream:
-            if cached and stat.st_size >= cached['offset'] and stat.st_ino == cached['inode']:
-                stream.seek(cached['offset'])
-                pending=dict(cached['pending'])
+            if cached and stat.st_size > cached.stamp[1] and stat.st_ino == cached.stamp[2]:
+                stream.seek(cached.offset)
+                pending=dict(cached.pending)
+                turn=cached.turn
             else:
                 stream.seek(max(0,stat.st_size-2_000_000))
                 if stream.tell():stream.readline()
+            start = stream.tell()
             while True:
                 offset=stream.tell()
                 line=stream.readline()
@@ -42,6 +125,7 @@ def pending_input(path):
                     continue
                 payload = record.get('payload') or {}
                 kind = payload.get('type') if record.get('type') == 'event_msg' else record.get('type')
+                turn = _rollout_turn(record, turn)
                 if kind in ('task_started', 'turn_aborted'):
                     pending.clear()
                 elif kind == 'task_complete':
@@ -51,19 +135,26 @@ def pending_input(path):
                     if payload.get('type') == 'function_call' and name in WAIT_TOOLS:
                         pending[payload.get('call_id', name)] = name
                     elif payload.get('type') == 'function_call_output':
-                        key=payload.get('call_id')
+                        key=payload.get('call_id', '')
                         if pending.get(key) != 'request_user_input_async':pending.pop(key,None)
                     elif payload.get('type') == 'message' and payload.get('role') == 'user':
                         pending.clear()
                 elif kind in ('request_user_input', 'exec_approval_request', 'apply_patch_approval_request'):
                     pending[payload.get('call_id') or payload.get('id') or kind] = kind
                 elif kind in ('server_request_resolved', 'serverRequest/resolved'):
-                    pending.pop(payload.get('requestId') or payload.get('id'),None)
+                    pending.pop(payload.get('requestId') or payload.get('id') or '',None)
+            if turn is None and start:
+                turn = _find_turn_before(stream, start)
     except OSError:
-        return False
+        return False, None
     if len(_PENDING_CACHE)>512:_PENDING_CACHE.clear()
-    _PENDING_CACHE[str(path)]={'stamp':stamp,'pending':dict(pending),'offset':offset,'inode':stat.st_ino}
-    return bool(pending)
+    _PENDING_CACHE[str(path)] = _RolloutCache(stamp, dict(pending), offset, turn)
+    return bool(pending), turn
+
+
+def pending_input(path: str | Path) -> bool:
+    """Only explicit pending input/approval events count; slow tools never imply approval."""
+    return _read_rollout(path)[0]
 
 
 @dataclass(frozen=True)
@@ -75,14 +166,14 @@ class Task:
     completed_at: float = 0
 
 
-def read_tasks(home=None):
+def read_tasks(home: str | Path | None = None) -> list[Task]:
     """Local history is implementation-specific: fail visibly if its schema changes."""
     root = Path(home or os.environ.get('CODEX_HOME') or Path.home()/'.codex')
     histories = sorted(root.glob('thread_history_*.sqlite'), key=lambda p:p.stat().st_mtime, reverse=True)
     states = sorted(root.glob('state_*.sqlite'), key=lambda p:p.stat().st_mtime, reverse=True)
     if not histories or not states:
         raise OSError('当前 Codex 未提供本地任务索引')
-    def connect(path):
+    def connect(path: Path) -> sqlite3.Connection:
         db = sqlite3.connect(path.resolve().as_uri()+'?mode=ro', uri=True, timeout=.2)
         db.execute('PRAGMA query_only=ON')
         return db
@@ -91,19 +182,29 @@ def read_tasks(home=None):
             'SELECT id,title,rollout_path,source FROM threads WHERE archived=0')}
     with closing(connect(histories[0])) as db:
         # One task per conversation, not one per tool or sub-agent.
-        rows = db.execute('''SELECT thread_id,turn_id,status,completed_at FROM
+        rows = db.execute('''SELECT thread_id,turn_id,status,completed_at,started_at FROM
             (SELECT *, ROW_NUMBER() OVER (PARTITION BY thread_id ORDER BY rollout_ordinal DESC) AS rn
              FROM thread_turns) WHERE rn=1''').fetchall()
     tasks = []
-    for tid, turn, status, completed in rows:
-        if tid not in threads:
-            continue
-        title, path, source = threads[tid]
+    latest = {row[0]: row[1:] for row in rows}
+    for tid, (title, path, source) in threads.items():
         if 'subagent' in str(source).lower():
             continue
+        indexed = latest.get(tid)
+        turn, status, completed, started = indexed or ('', '', 0, 0)
         state = {'inProgress':'running', 'completed':'completed',
                  'failed':'failed', 'interrupted':'interrupted'}.get(status, 'unknown')
-        if state in ('running','completed') and pending_input(path):
+        pending, event = _read_rollout(path)
+        if event is not None and (
+            indexed is None or
+            (event.id != turn and event.started_at > (started or 0)) or
+            (event.id == turn and state in ('running', 'unknown'))
+        ):
+            completed = event.completed_at or (completed if event.id == turn else 0)
+            turn, state = event.id, event.state
+        elif indexed is None:
+            continue
+        if state in ('running','completed') and pending:
             state = 'waiting'
         tasks.append(Task(tid, turn, title or '未命名任务', state, completed or 0))
     return tasks
